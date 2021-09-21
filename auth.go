@@ -266,6 +266,7 @@ func krb5ParseAuthData(authData []byte) (string, string) {
 	binary.Read(buf, binary.LittleEndian, &spnLen)
 	packet := authData[2:]
 	spn := string(packet[:spnLen])
+
 	// next realm
 	packet = packet[spnLen:]
 	buf = bytes.NewBuffer(packet[:2])
@@ -275,6 +276,11 @@ func krb5ParseAuthData(authData []byte) (string, string) {
 	realm := string(packet[:realmLen])
 	// remove realm from SPN
 	spn = strings.TrimSuffix(spn, "@"+realm)
+	if strings.Contains(spn, "@") {
+		parts := strings.Split(spn, "@")
+		spn, realm = parts[0], parts[1]
+	}
+
 	return spn, realm
 }
 
@@ -381,6 +387,7 @@ func (mc *mysqlConn) auth(authData []byte, plugin string) ([]byte, error) {
 			if err != nil {
 				return nil, err
 			}
+			ccache.DefaultPrincipal.Realm = realm
 
 			cl, err = client.NewFromCCache(ccache, conf, client.Logger(l), client.DisablePAFXFAST(true), client.AssumePreAuthentication(false))
 			if err != nil {
@@ -402,12 +409,12 @@ func (mc *mysqlConn) auth(authData []byte, plugin string) ([]byte, error) {
 		// Log in the client
 		err = cl.Login()
 		if err != nil {
-			log.Fatalf("could not login client: %v", err)
+			return nil, fmt.Errorf("could not login client: %w", err)
 		}
 
 		_, _, err = cl.GetServiceTicket(spn)
 		if err != nil {
-			log.Printf("failed to get service ticket: %v\n", err)
+			return nil, fmt.Errorf("failed to get service ticket: %w", err)
 		}
 		log.Println("ok got service ticket...")
 
