@@ -260,7 +260,7 @@ func (mc *mysqlConn) sendEncryptedPassword(seed []byte, pub *rsa.PublicKey) erro
 //
 //Returns:
 //		'spn' and 'realm'
-func krb5ParseAuthData(authData []byte) (string, string) {
+func krb5ParseAuthData(authData []byte) (string, string, string) {
 	buf := bytes.NewBuffer(authData[:2])
 	spnLen := int16(0)
 	binary.Read(buf, binary.LittleEndian, &spnLen)
@@ -269,13 +269,23 @@ func krb5ParseAuthData(authData []byte) (string, string) {
 	// next realm
 	packet = packet[spnLen:]
 	buf = bytes.NewBuffer(packet[:2])
-	realmLen := int16(0)
-	binary.Read(buf, binary.LittleEndian, &realmLen)
+	UPNRealmLen := int16(0)
+	binary.Read(buf, binary.LittleEndian, &UPNRealmLen)
 	packet = packet[2:]
-	realm := string(packet[:realmLen])
+	UPNRealm := string(packet[:UPNRealmLen])
 	// remove realm from SPN
-	spn = strings.TrimSuffix(spn, "@"+realm)
-	return spn, realm
+	spn = strings.TrimSuffix(spn, "@"+UPNRealm)
+	// check if there is a different realm in the spn
+	if strings.Contains(spn, "@") {
+		// get the realm supplied by the spn
+		// if the SPM realm does not match the auth realm, return the SPN supplied realm
+		SPNRealm := strings.Split(spn, "@")[1]
+		spn = strings.TrimSuffix(spn, "@"+SPNRealm)
+		if SPNRealm != UPNRealm {
+			return spn, SPNRealm, UPNRealm
+		}
+	}
+	return spn, UPNRealm, UPNRealm
 }
 
 func (mc *mysqlConn) auth(authData []byte, plugin string) ([]byte, error) {
@@ -347,13 +357,16 @@ func (mc *mysqlConn) auth(authData []byte, plugin string) ([]byte, error) {
 		}
 		log.Printf("%v", authData)
 		// decode the SPN from authData
-		spn, realm := krb5ParseAuthData(authData)
+		spn, spnRealm, realm := krb5ParseAuthData(authData)
 		log.Printf("SPN: %s", spn)
+		log.Printf("SPN Realm: %s", spnRealm)
 		log.Printf("Realm: %s", realm)
 		conf, err := config.NewFromString(string(krb5Config))
 		if err != nil {
 			log.Fatalf("could not load krb5.conf: %v", err)
 		}
+		// set the default realm to the parsed realm
+		conf.LibDefaults.DefaultRealm = spnRealm
 
 		// load keytab from file
 		keytabFilename := os.Getenv("KRB5_CLIENT_KTNAME")
@@ -381,7 +394,6 @@ func (mc *mysqlConn) auth(authData []byte, plugin string) ([]byte, error) {
 			if err != nil {
 				return nil, err
 			}
-
 			cl, err = client.NewFromCCache(ccache, conf, client.Logger(l), client.DisablePAFXFAST(true), client.AssumePreAuthentication(false))
 			if err != nil {
 				return nil, err
@@ -396,7 +408,7 @@ func (mc *mysqlConn) auth(authData []byte, plugin string) ([]byte, error) {
 			if err != nil {
 				return nil, err
 			}
-			cl = client.NewWithKeytab(mc.cfg.User, conf.LibDefaults.DefaultRealm, kt, conf, client.Logger(l), client.DisablePAFXFAST(true), client.AssumePreAuthentication(false))
+			cl = client.NewWithKeytab(mc.cfg.User, spnRealm, kt, conf, client.Logger(l), client.DisablePAFXFAST(true), client.AssumePreAuthentication(false))
 		}
 
 		// Log in the client
