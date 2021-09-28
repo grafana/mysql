@@ -351,16 +351,18 @@ func (mc *mysqlConn) auth(authData []byte, plugin string) ([]byte, error) {
 		if krb5ConfigFilename == "" {
 			krb5ConfigFilename = "/etc/krb5.conf"
 		}
+		log.Printf("Using KRB5_CONFIG: %s", krb5ConfigFilename)
+
 		krb5Config, err := ioutil.ReadFile(krb5ConfigFilename)
 		if err != nil {
 			log.Fatalf("could not read krb5.conf (%s): %v", krb5ConfigFilename, err)
 		}
 		log.Printf("%v", authData)
 		// decode the SPN from authData
-		spn, spnRealm, realm := krb5ParseAuthData(authData)
+		spn, spnRealm, upnRealm := krb5ParseAuthData(authData)
 		log.Printf("SPN: %s", spn)
 		log.Printf("SPN Realm: %s", spnRealm)
-		log.Printf("Realm: %s", realm)
+		log.Printf("UPN Realm: %s", upnRealm)
 		conf, err := config.NewFromString(string(krb5Config))
 		if err != nil {
 			log.Fatalf("could not load krb5.conf: %v", err)
@@ -374,7 +376,7 @@ func (mc *mysqlConn) auth(authData []byte, plugin string) ([]byte, error) {
 			// try default
 			keytabFilename = conf.LibDefaults.DefaultClientKeytabName
 		}
-		log.Printf("Using keytab %s", keytabFilename)
+		log.Printf("Using keytab: %s", keytabFilename)
 
 		var cl *client.Client
 
@@ -389,6 +391,7 @@ func (mc *mysqlConn) auth(authData []byte, plugin string) ([]byte, error) {
 				// KRB5CCNAME is not set, return the error from loading the Keytab.
 				return nil, err
 			}
+			log.Printf("Using credential cache KRB5CCNAME: %s", ccacheFileDest)
 
 			ccache, err := credentials.LoadCCache(ccacheFileDest)
 			if err != nil {
