@@ -1,6 +1,6 @@
 module github.com/grafana/mysql
 
-go 1.13
+go 1.18
 
 require (
 	github.com/jcmturner/gokrb5/v8 v8.4.2

@@ -17,7 +17,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"log"
 	"math"
 	"net"
@@ -149,29 +148,18 @@ func runTests(t *testing.T, dsn string, tests ...func(dbt *DBTest)) {
 		defer db2.Close()
 	}
 
-	dsn3 := dsn + "&multiStatements=true"
-	var db3 *sql.DB
-	if _, err := ParseDSN(dsn3); err != errInvalidDSNUnsafeCollation {
-		db3, err = sql.Open("mysql", dsn3)
-		if err != nil {
-			t.Fatalf("error connecting: %s", err.Error())
-		}
-		defer db3.Close()
-	}
-
-	dbt := &DBTest{t, db}
-	dbt2 := &DBTest{t, db2}
-	dbt3 := &DBTest{t, db3}
 	for _, test := range tests {
-		test(dbt)
-		dbt.db.Exec("DROP TABLE IF EXISTS test")
+		t.Run("default", func(t *testing.T) {
+			dbt := &DBTest{t, db}
+			test(dbt)
+			dbt.db.Exec("DROP TABLE IF EXISTS test")
+		})
 		if db2 != nil {
-			test(dbt2)
-			dbt2.db.Exec("DROP TABLE IF EXISTS test")
-		}
-		if db3 != nil {
-			test(dbt3)
-			dbt3.db.Exec("DROP TABLE IF EXISTS test")
+			t.Run("interpolateParams", func(t *testing.T) {
+				dbt2 := &DBTest{t, db2}
+				test(dbt2)
+				dbt2.db.Exec("DROP TABLE IF EXISTS test")
+			})
 		}
 	}
 }
@@ -317,6 +305,48 @@ func TestCRUD(t *testing.T) {
 	})
 }
 
+// TestNumbers test that selecting numeric columns.
+// Both of textRows and binaryRows should return same type and value.
+func TestNumbersToAny(t *testing.T) {
+	runTests(t, dsn, func(dbt *DBTest) {
+		dbt.mustExec("CREATE TABLE `test` (id INT PRIMARY KEY, b BOOL, i8 TINYINT, " +
+			"i16 SMALLINT, i32 INT, i64 BIGINT, f32 FLOAT, f64 DOUBLE)")
+		dbt.mustExec("INSERT INTO `test` VALUES (1, true, 127, 32767, 2147483647, 9223372036854775807, 1.25, 2.5)")
+
+		// Use binaryRows for intarpolateParams=false and textRows for intarpolateParams=true.
+		rows := dbt.mustQuery("SELECT b, i8, i16, i32, i64, f32, f64 FROM `test` WHERE id=?", 1)
+		if !rows.Next() {
+			dbt.Fatal("no data")
+		}
+		var b, i8, i16, i32, i64, f32, f64 any
+		err := rows.Scan(&b, &i8, &i16, &i32, &i64, &f32, &f64)
+		if err != nil {
+			dbt.Fatal(err)
+		}
+		if b.(int64) != 1 {
+			dbt.Errorf("b != 1")
+		}
+		if i8.(int64) != 127 {
+			dbt.Errorf("i8 != 127")
+		}
+		if i16.(int64) != 32767 {
+			dbt.Errorf("i16 != 32767")
+		}
+		if i32.(int64) != 2147483647 {
+			dbt.Errorf("i32 != 2147483647")
+		}
+		if i64.(int64) != 9223372036854775807 {
+			dbt.Errorf("i64 != 9223372036854775807")
+		}
+		if f32.(float32) != 1.25 {
+			dbt.Errorf("f32 != 1.25")
+		}
+		if f64.(float64) != 2.5 {
+			dbt.Errorf("f64 != 2.5")
+		}
+	})
+}
+
 func TestMultiQuery(t *testing.T) {
 	runTestsWithMultiStatement(t, dsn, func(dbt *DBTest) {
 		// Create Table
@@ -347,8 +377,8 @@ func TestMultiQuery(t *testing.T) {
 		rows := dbt.mustQuery("SELECT value FROM test WHERE id=1;")
 		if rows.Next() {
 			rows.Scan(&out)
-			if 5 != out {
-				dbt.Errorf("5 != %d", out)
+			if out != 5 {
+				dbt.Errorf("expected 5, got %d", out)
 			}
 
 			if rows.Next() {
@@ -1245,7 +1275,7 @@ func TestLoadData(t *testing.T) {
 		dbt.mustExec("CREATE TABLE test (id INT NOT NULL PRIMARY KEY, value TEXT NOT NULL) CHARACTER SET utf8")
 
 		// Local File
-		file, err := ioutil.TempFile("", "gotest")
+		file, err := os.CreateTemp("", "gotest")
 		defer os.Remove(file.Name())
 		if err != nil {
 			dbt.Fatal(err)
@@ -1294,7 +1324,7 @@ func TestLoadData(t *testing.T) {
 		_, err = dbt.db.Exec("LOAD DATA LOCAL INFILE 'Reader::doesnotexist' INTO TABLE test")
 		if err == nil {
 			dbt.Fatal("load non-existent Reader didn't fail")
-		} else if err.Error() != "Reader 'doesnotexist' is not registered" {
+		} else if err.Error() != "reader 'doesnotexist' is not registered" {
 			dbt.Fatal(err.Error())
 		}
 	})
@@ -1402,6 +1432,7 @@ func TestReuseClosedConnection(t *testing.T) {
 	if err != nil {
 		t.Fatalf("error preparing statement: %s", err.Error())
 	}
+	//lint:ignore SA1019 this is a test
 	_, err = stmt.Exec(nil)
 	if err != nil {
 		t.Fatalf("error executing statement: %s", err.Error())
@@ -1416,6 +1447,7 @@ func TestReuseClosedConnection(t *testing.T) {
 			t.Errorf("panic after reusing a closed connection: %v", err)
 		}
 	}()
+	//lint:ignore SA1019 this is a test
 	_, err = stmt.Exec(nil)
 	if err != nil && err != driver.ErrBadConn {
 		t.Errorf("unexpected error '%s', expected '%s'",
@@ -1479,7 +1511,7 @@ func TestCollation(t *testing.T) {
 		defaultCollation, // driver default
 		"latin1_general_ci",
 		"binary",
-		"utf8_unicode_ci",
+		"utf8mb4_unicode_ci",
 		"cp1257_bin",
 	}
 
@@ -1807,13 +1839,13 @@ func TestConcurrent(t *testing.T) {
 	}
 
 	runTests(t, dsn, func(dbt *DBTest) {
-		var version string
-		if err := dbt.db.QueryRow("SELECT @@version").Scan(&version); err != nil {
-			dbt.Fatalf("%s", err.Error())
-		}
-		if strings.Contains(strings.ToLower(version), "mariadb") {
-			t.Skip(`TODO: "fix commands out of sync. Did you run multiple statements at once?" on MariaDB`)
-		}
+		// var version string
+		// if err := dbt.db.QueryRow("SELECT @@version").Scan(&version); err != nil {
+		// 	dbt.Fatal(err)
+		// }
+		// if strings.Contains(strings.ToLower(version), "mariadb") {
+		// 	t.Skip(`TODO: "fix commands out of sync. Did you run multiple statements at once?" on MariaDB`)
+		// }
 
 		var max int
 		err := dbt.db.QueryRow("SELECT @@max_connections").Scan(&max)
@@ -1995,7 +2027,7 @@ func TestInsertRetrieveEscapedData(t *testing.T) {
 func TestUnixSocketAuthFail(t *testing.T) {
 	runTests(t, dsn, func(dbt *DBTest) {
 		// Save the current logger so we can restore it.
-		oldLogger := errLog
+		oldLogger := defaultLogger
 
 		// Set a new logger so we can capture its output.
 		buffer := bytes.NewBuffer(make([]byte, 0, 64))
@@ -2155,10 +2187,50 @@ func TestRejectReadOnly(t *testing.T) {
 }
 
 func TestPing(t *testing.T) {
+	ctx := context.Background()
 	runTests(t, dsn, func(dbt *DBTest) {
 		if err := dbt.db.Ping(); err != nil {
 			dbt.fail("Ping", "Ping", err)
 		}
+	})
+
+	runTests(t, dsn, func(dbt *DBTest) {
+		conn, err := dbt.db.Conn(ctx)
+		if err != nil {
+			dbt.fail("db", "Conn", err)
+		}
+
+		// Check that affectedRows and insertIds are cleared after each call.
+		conn.Raw(func(conn interface{}) error {
+			c := conn.(*mysqlConn)
+
+			// Issue a query that sets affectedRows and insertIds.
+			q, err := c.Query(`SELECT 1`, nil)
+			if err != nil {
+				dbt.fail("Conn", "Query", err)
+			}
+			if got, want := c.result.affectedRows, []int64{0}; !reflect.DeepEqual(got, want) {
+				dbt.Fatalf("bad affectedRows: got %v, want=%v", got, want)
+			}
+			if got, want := c.result.insertIds, []int64{0}; !reflect.DeepEqual(got, want) {
+				dbt.Fatalf("bad insertIds: got %v, want=%v", got, want)
+			}
+			q.Close()
+
+			// Verify that Ping() clears both fields.
+			for i := 0; i < 2; i++ {
+				if err := c.Ping(ctx); err != nil {
+					dbt.fail("Pinger", "Ping", err)
+				}
+				if got, want := c.result.affectedRows, []int64(nil); !reflect.DeepEqual(got, want) {
+					t.Errorf("bad affectedRows: got %v, want=%v", got, want)
+				}
+				if got, want := c.result.insertIds, []int64(nil); !reflect.DeepEqual(got, want) {
+					t.Errorf("bad affectedRows: got %v, want=%v", got, want)
+				}
+			}
+			return nil
+		})
 	})
 }
 
@@ -2379,6 +2451,43 @@ func TestMultiResultSetNoSelect(t *testing.T) {
 	})
 }
 
+func TestExecMultipleResults(t *testing.T) {
+	ctx := context.Background()
+	runTestsWithMultiStatement(t, dsn, func(dbt *DBTest) {
+		dbt.mustExec(`
+		CREATE TABLE test (
+			id INT NOT NULL AUTO_INCREMENT,
+			value VARCHAR(255),
+			PRIMARY KEY (id)
+		)`)
+		conn, err := dbt.db.Conn(ctx)
+		if err != nil {
+			t.Fatalf("failed to connect: %v", err)
+		}
+		conn.Raw(func(conn interface{}) error {
+			//lint:ignore SA1019 this is a test
+			ex := conn.(driver.Execer)
+			res, err := ex.Exec(`
+			INSERT INTO test (value) VALUES ('a'), ('b');
+			INSERT INTO test (value) VALUES ('c'), ('d'), ('e');
+			`, nil)
+			if err != nil {
+				t.Fatalf("insert statements failed: %v", err)
+			}
+			mres := res.(Result)
+			if got, want := mres.AllRowsAffected(), []int64{2, 3}; !reflect.DeepEqual(got, want) {
+				t.Errorf("bad AllRowsAffected: got %v, want=%v", got, want)
+			}
+			// For INSERTs containing multiple rows, LAST_INSERT_ID() returns the
+			// first inserted ID, not the last.
+			if got, want := mres.AllLastInsertIds(), []int64{1, 3}; !reflect.DeepEqual(got, want) {
+				t.Errorf("bad AllLastInsertIds: got %v, want %v", got, want)
+			}
+			return nil
+		})
+	})
+}
+
 // tests if rows are set in a proper state if some results were ignored before
 // calling rows.NextResultSet.
 func TestSkipResults(t *testing.T) {
@@ -2397,6 +2506,42 @@ func TestSkipResults(t *testing.T) {
 		if err := rows.Err(); err != nil {
 			dbt.Error("expected nil; got ", err)
 		}
+	})
+}
+
+func TestQueryMultipleResults(t *testing.T) {
+	ctx := context.Background()
+	runTestsWithMultiStatement(t, dsn, func(dbt *DBTest) {
+		dbt.mustExec(`
+		CREATE TABLE test (
+			id INT NOT NULL AUTO_INCREMENT,
+			value VARCHAR(255),
+			PRIMARY KEY (id)
+		)`)
+		conn, err := dbt.db.Conn(ctx)
+		if err != nil {
+			t.Fatalf("failed to connect: %v", err)
+		}
+		conn.Raw(func(conn interface{}) error {
+			//lint:ignore SA1019 this is a test
+			qr := conn.(driver.Queryer)
+			c := conn.(*mysqlConn)
+
+			// Demonstrate that repeated queries reset the affectedRows
+			for i := 0; i < 2; i++ {
+				_, err := qr.Query(`
+				INSERT INTO test (value) VALUES ('a'), ('b');
+				INSERT INTO test (value) VALUES ('c'), ('d'), ('e');
+			`, nil)
+				if err != nil {
+					t.Fatalf("insert statements failed: %v", err)
+				}
+				if got, want := c.result.affectedRows, []int64{2, 3}; !reflect.DeepEqual(got, want) {
+					t.Errorf("bad affectedRows: got %v, want=%v", got, want)
+				}
+			}
+			return nil
+		})
 	})
 }
 
@@ -2703,7 +2848,7 @@ func TestContextBeginIsolationLevel(t *testing.T) {
 		if err := row.Scan(&v); err != nil {
 			dbt.Fatal(err)
 		}
-		// Because writer transaction wasn't commited yet, it should be available
+		// Because writer transaction wasn't committed yet, it should be available
 		if v != 0 {
 			dbt.Errorf("expected val to be 0, got %d", v)
 		}
@@ -2717,7 +2862,7 @@ func TestContextBeginIsolationLevel(t *testing.T) {
 		if err := row.Scan(&v); err != nil {
 			dbt.Fatal(err)
 		}
-		// Data written by writer transaction is already commited, it should be selectable
+		// Data written by writer transaction is already committed, it should be selectable
 		if v != 1 {
 			dbt.Errorf("expected val to be 1, got %d", v)
 		}
@@ -2778,13 +2923,18 @@ func TestRowsColumnTypes(t *testing.T) {
 	nd1 := sql.NullTime{Time: time.Date(2006, 01, 02, 0, 0, 0, 0, time.UTC), Valid: true}
 	nd2 := sql.NullTime{Time: time.Date(2006, 03, 04, 0, 0, 0, 0, time.UTC), Valid: true}
 	ndNULL := sql.NullTime{Time: time.Time{}, Valid: false}
-	rbNULL := sql.RawBytes(nil)
-	rb0 := sql.RawBytes("0")
-	rb42 := sql.RawBytes("42")
-	rbTest := sql.RawBytes("Test")
-	rb0pad4 := sql.RawBytes("0\x00\x00\x00") // BINARY right-pads values with 0x00
-	rbx0 := sql.RawBytes("\x00")
-	rbx42 := sql.RawBytes("\x42")
+	bNULL := []byte(nil)
+	nsNULL := sql.NullString{String: "", Valid: false}
+	// Helper function to build NullString from string literal.
+	ns := func(s string) sql.NullString { return sql.NullString{String: s, Valid: true} }
+	ns0 := ns("0")
+	b0 := []byte("0")
+	b42 := []byte("42")
+	nsTest := ns("Test")
+	bTest := []byte("Test")
+	b0pad4 := []byte("0\x00\x00\x00") // BINARY right-pads values with 0x00
+	bx0 := []byte("\x00")
+	bx42 := []byte("\x42")
 
 	var columns = []struct {
 		name             string
@@ -2797,7 +2947,7 @@ func TestRowsColumnTypes(t *testing.T) {
 		valuesIn         [3]string
 		valuesOut        [3]interface{}
 	}{
-		{"bit8null", "BIT(8)", "BIT", scanTypeRawBytes, true, 0, 0, [3]string{"0x0", "NULL", "0x42"}, [3]interface{}{rbx0, rbNULL, rbx42}},
+		{"bit8null", "BIT(8)", "BIT", scanTypeBytes, true, 0, 0, [3]string{"0x0", "NULL", "0x42"}, [3]interface{}{bx0, bNULL, bx42}},
 		{"boolnull", "BOOL", "TINYINT", scanTypeNullInt, true, 0, 0, [3]string{"NULL", "true", "0"}, [3]interface{}{niNULL, ni1, ni0}},
 		{"bool", "BOOL NOT NULL", "TINYINT", scanTypeInt8, false, 0, 0, [3]string{"1", "0", "FALSE"}, [3]interface{}{int8(1), int8(0), int8(0)}},
 		{"intnull", "INTEGER", "INT", scanTypeNullInt, true, 0, 0, [3]string{"0", "NULL", "42"}, [3]interface{}{ni0, niNULL, ni42}},
@@ -2811,30 +2961,31 @@ func TestRowsColumnTypes(t *testing.T) {
 		{"tinyuint", "TINYINT UNSIGNED NOT NULL", "UNSIGNED TINYINT", scanTypeUint8, false, 0, 0, [3]string{"0", "255", "42"}, [3]interface{}{uint8(0), uint8(255), uint8(42)}},
 		{"smalluint", "SMALLINT UNSIGNED NOT NULL", "UNSIGNED SMALLINT", scanTypeUint16, false, 0, 0, [3]string{"0", "65535", "42"}, [3]interface{}{uint16(0), uint16(65535), uint16(42)}},
 		{"biguint", "BIGINT UNSIGNED NOT NULL", "UNSIGNED BIGINT", scanTypeUint64, false, 0, 0, [3]string{"0", "65535", "42"}, [3]interface{}{uint64(0), uint64(65535), uint64(42)}},
+		{"mediumuint", "MEDIUMINT UNSIGNED NOT NULL", "UNSIGNED MEDIUMINT", scanTypeUint32, false, 0, 0, [3]string{"0", "16777215", "42"}, [3]interface{}{uint32(0), uint32(16777215), uint32(42)}},
 		{"uint13", "INT(13) UNSIGNED NOT NULL", "UNSIGNED INT", scanTypeUint32, false, 0, 0, [3]string{"0", "1337", "42"}, [3]interface{}{uint32(0), uint32(1337), uint32(42)}},
 		{"float", "FLOAT NOT NULL", "FLOAT", scanTypeFloat32, false, math.MaxInt64, math.MaxInt64, [3]string{"0", "42", "13.37"}, [3]interface{}{float32(0), float32(42), float32(13.37)}},
 		{"floatnull", "FLOAT", "FLOAT", scanTypeNullFloat, true, math.MaxInt64, math.MaxInt64, [3]string{"0", "NULL", "13.37"}, [3]interface{}{nf0, nfNULL, nf1337}},
 		{"float74null", "FLOAT(7,4)", "FLOAT", scanTypeNullFloat, true, math.MaxInt64, 4, [3]string{"0", "NULL", "13.37"}, [3]interface{}{nf0, nfNULL, nf1337}},
 		{"double", "DOUBLE NOT NULL", "DOUBLE", scanTypeFloat64, false, math.MaxInt64, math.MaxInt64, [3]string{"0", "42", "13.37"}, [3]interface{}{float64(0), float64(42), float64(13.37)}},
 		{"doublenull", "DOUBLE", "DOUBLE", scanTypeNullFloat, true, math.MaxInt64, math.MaxInt64, [3]string{"0", "NULL", "13.37"}, [3]interface{}{nf0, nfNULL, nf1337}},
-		{"decimal1", "DECIMAL(10,6) NOT NULL", "DECIMAL", scanTypeRawBytes, false, 10, 6, [3]string{"0", "13.37", "1234.123456"}, [3]interface{}{sql.RawBytes("0.000000"), sql.RawBytes("13.370000"), sql.RawBytes("1234.123456")}},
-		{"decimal1null", "DECIMAL(10,6)", "DECIMAL", scanTypeRawBytes, true, 10, 6, [3]string{"0", "NULL", "1234.123456"}, [3]interface{}{sql.RawBytes("0.000000"), rbNULL, sql.RawBytes("1234.123456")}},
-		{"decimal2", "DECIMAL(8,4) NOT NULL", "DECIMAL", scanTypeRawBytes, false, 8, 4, [3]string{"0", "13.37", "1234.123456"}, [3]interface{}{sql.RawBytes("0.0000"), sql.RawBytes("13.3700"), sql.RawBytes("1234.1235")}},
-		{"decimal2null", "DECIMAL(8,4)", "DECIMAL", scanTypeRawBytes, true, 8, 4, [3]string{"0", "NULL", "1234.123456"}, [3]interface{}{sql.RawBytes("0.0000"), rbNULL, sql.RawBytes("1234.1235")}},
-		{"decimal3", "DECIMAL(5,0) NOT NULL", "DECIMAL", scanTypeRawBytes, false, 5, 0, [3]string{"0", "13.37", "-12345.123456"}, [3]interface{}{rb0, sql.RawBytes("13"), sql.RawBytes("-12345")}},
-		{"decimal3null", "DECIMAL(5,0)", "DECIMAL", scanTypeRawBytes, true, 5, 0, [3]string{"0", "NULL", "-12345.123456"}, [3]interface{}{rb0, rbNULL, sql.RawBytes("-12345")}},
-		{"char25null", "CHAR(25)", "CHAR", scanTypeRawBytes, true, 0, 0, [3]string{"0", "NULL", "'Test'"}, [3]interface{}{rb0, rbNULL, rbTest}},
-		{"varchar42", "VARCHAR(42) NOT NULL", "VARCHAR", scanTypeRawBytes, false, 0, 0, [3]string{"0", "'Test'", "42"}, [3]interface{}{rb0, rbTest, rb42}},
-		{"binary4null", "BINARY(4)", "BINARY", scanTypeRawBytes, true, 0, 0, [3]string{"0", "NULL", "'Test'"}, [3]interface{}{rb0pad4, rbNULL, rbTest}},
-		{"varbinary42", "VARBINARY(42) NOT NULL", "VARBINARY", scanTypeRawBytes, false, 0, 0, [3]string{"0", "'Test'", "42"}, [3]interface{}{rb0, rbTest, rb42}},
-		{"tinyblobnull", "TINYBLOB", "BLOB", scanTypeRawBytes, true, 0, 0, [3]string{"0", "NULL", "'Test'"}, [3]interface{}{rb0, rbNULL, rbTest}},
-		{"tinytextnull", "TINYTEXT", "TEXT", scanTypeRawBytes, true, 0, 0, [3]string{"0", "NULL", "'Test'"}, [3]interface{}{rb0, rbNULL, rbTest}},
-		{"blobnull", "BLOB", "BLOB", scanTypeRawBytes, true, 0, 0, [3]string{"0", "NULL", "'Test'"}, [3]interface{}{rb0, rbNULL, rbTest}},
-		{"textnull", "TEXT", "TEXT", scanTypeRawBytes, true, 0, 0, [3]string{"0", "NULL", "'Test'"}, [3]interface{}{rb0, rbNULL, rbTest}},
-		{"mediumblob", "MEDIUMBLOB NOT NULL", "BLOB", scanTypeRawBytes, false, 0, 0, [3]string{"0", "'Test'", "42"}, [3]interface{}{rb0, rbTest, rb42}},
-		{"mediumtext", "MEDIUMTEXT NOT NULL", "TEXT", scanTypeRawBytes, false, 0, 0, [3]string{"0", "'Test'", "42"}, [3]interface{}{rb0, rbTest, rb42}},
-		{"longblob", "LONGBLOB NOT NULL", "BLOB", scanTypeRawBytes, false, 0, 0, [3]string{"0", "'Test'", "42"}, [3]interface{}{rb0, rbTest, rb42}},
-		{"longtext", "LONGTEXT NOT NULL", "TEXT", scanTypeRawBytes, false, 0, 0, [3]string{"0", "'Test'", "42"}, [3]interface{}{rb0, rbTest, rb42}},
+		{"decimal1", "DECIMAL(10,6) NOT NULL", "DECIMAL", scanTypeString, false, 10, 6, [3]string{"0", "13.37", "1234.123456"}, [3]interface{}{"0.000000", "13.370000", "1234.123456"}},
+		{"decimal1null", "DECIMAL(10,6)", "DECIMAL", scanTypeNullString, true, 10, 6, [3]string{"0", "NULL", "1234.123456"}, [3]interface{}{ns("0.000000"), nsNULL, ns("1234.123456")}},
+		{"decimal2", "DECIMAL(8,4) NOT NULL", "DECIMAL", scanTypeString, false, 8, 4, [3]string{"0", "13.37", "1234.123456"}, [3]interface{}{"0.0000", "13.3700", "1234.1235"}},
+		{"decimal2null", "DECIMAL(8,4)", "DECIMAL", scanTypeNullString, true, 8, 4, [3]string{"0", "NULL", "1234.123456"}, [3]interface{}{ns("0.0000"), nsNULL, ns("1234.1235")}},
+		{"decimal3", "DECIMAL(5,0) NOT NULL", "DECIMAL", scanTypeString, false, 5, 0, [3]string{"0", "13.37", "-12345.123456"}, [3]interface{}{"0", "13", "-12345"}},
+		{"decimal3null", "DECIMAL(5,0)", "DECIMAL", scanTypeNullString, true, 5, 0, [3]string{"0", "NULL", "-12345.123456"}, [3]interface{}{ns0, nsNULL, ns("-12345")}},
+		{"char25null", "CHAR(25)", "CHAR", scanTypeNullString, true, 0, 0, [3]string{"0", "NULL", "'Test'"}, [3]interface{}{ns0, nsNULL, nsTest}},
+		{"varchar42", "VARCHAR(42) NOT NULL", "VARCHAR", scanTypeString, false, 0, 0, [3]string{"0", "'Test'", "42"}, [3]interface{}{"0", "Test", "42"}},
+		{"binary4null", "BINARY(4)", "BINARY", scanTypeBytes, true, 0, 0, [3]string{"0", "NULL", "'Test'"}, [3]interface{}{b0pad4, bNULL, bTest}},
+		{"varbinary42", "VARBINARY(42) NOT NULL", "VARBINARY", scanTypeBytes, false, 0, 0, [3]string{"0", "'Test'", "42"}, [3]interface{}{b0, bTest, b42}},
+		{"tinyblobnull", "TINYBLOB", "BLOB", scanTypeBytes, true, 0, 0, [3]string{"0", "NULL", "'Test'"}, [3]interface{}{b0, bNULL, bTest}},
+		{"tinytextnull", "TINYTEXT", "TEXT", scanTypeNullString, true, 0, 0, [3]string{"0", "NULL", "'Test'"}, [3]interface{}{ns0, nsNULL, nsTest}},
+		{"blobnull", "BLOB", "BLOB", scanTypeBytes, true, 0, 0, [3]string{"0", "NULL", "'Test'"}, [3]interface{}{b0, bNULL, bTest}},
+		{"textnull", "TEXT", "TEXT", scanTypeNullString, true, 0, 0, [3]string{"0", "NULL", "'Test'"}, [3]interface{}{ns0, nsNULL, nsTest}},
+		{"mediumblob", "MEDIUMBLOB NOT NULL", "BLOB", scanTypeBytes, false, 0, 0, [3]string{"0", "'Test'", "42"}, [3]interface{}{b0, bTest, b42}},
+		{"mediumtext", "MEDIUMTEXT NOT NULL", "TEXT", scanTypeString, false, 0, 0, [3]string{"0", "'Test'", "42"}, [3]interface{}{"0", "Test", "42"}},
+		{"longblob", "LONGBLOB NOT NULL", "BLOB", scanTypeBytes, false, 0, 0, [3]string{"0", "'Test'", "42"}, [3]interface{}{b0, bTest, b42}},
+		{"longtext", "LONGTEXT NOT NULL", "TEXT", scanTypeString, false, 0, 0, [3]string{"0", "'Test'", "42"}, [3]interface{}{"0", "Test", "42"}},
 		{"datetime", "DATETIME", "DATETIME", scanTypeNullTime, true, 0, 0, [3]string{"'2006-01-02 15:04:05'", "'2006-01-02 15:04:05.1'", "'2006-01-02 15:04:05.111111'"}, [3]interface{}{nt0, nt0, nt0}},
 		{"datetime2", "DATETIME(2)", "DATETIME", scanTypeNullTime, true, 2, 2, [3]string{"'2006-01-02 15:04:05'", "'2006-01-02 15:04:05.1'", "'2006-01-02 15:04:05.111111'"}, [3]interface{}{nt0, nt1, nt2}},
 		{"datetime6", "DATETIME(6)", "DATETIME", scanTypeNullTime, true, 6, 6, [3]string{"'2006-01-02 15:04:05'", "'2006-01-02 15:04:05.1'", "'2006-01-02 15:04:05.111111'"}, [3]interface{}{nt0, nt1, nt6}},
@@ -2945,7 +3096,10 @@ func TestRowsColumnTypes(t *testing.T) {
 				continue
 			}
 		}
-
+		// Avoid panic caused by nil scantype.
+		if t.Failed() {
+			return
+		}
 		values := make([]interface{}, len(tt))
 		for i := range values {
 			values[i] = reflect.New(types[i]).Interface()
@@ -2956,14 +3110,10 @@ func TestRowsColumnTypes(t *testing.T) {
 			if err != nil {
 				t.Fatalf("failed to scan values in %v", err)
 			}
-			for j := range values {
-				value := reflect.ValueOf(values[j]).Elem().Interface()
+			for j, value := range values {
+				value := reflect.ValueOf(value).Elem().Interface()
 				if !reflect.DeepEqual(value, columns[j].valuesOut[i]) {
-					if columns[j].scanType == scanTypeRawBytes {
-						t.Errorf("row %d, column %d: %v != %v", i, j, string(value.(sql.RawBytes)), string(columns[j].valuesOut[i].(sql.RawBytes)))
-					} else {
-						t.Errorf("row %d, column %d: %v != %v", i, j, value, columns[j].valuesOut[i])
-					}
+					t.Errorf("row %d, column %d: %v != %v", i, j, value, columns[j].valuesOut[i])
 				}
 			}
 			i++
@@ -3208,4 +3358,51 @@ func TestConnectorTimeoutsWatchCancel(t *testing.T) {
 	if !created.closed {
 		t.Errorf("connection not closed")
 	}
+}
+
+func TestConnectionAttributes(t *testing.T) {
+	if !available {
+		t.Skipf("MySQL server not running on %s", netAddr)
+	}
+
+	attr1 := "attr1"
+	value1 := "value1"
+	attr2 := "foo"
+	value2 := "boo"
+	dsn += fmt.Sprintf("&connectionAttributes=%s:%s,%s:%s", attr1, value1, attr2, value2)
+
+	var db *sql.DB
+	if _, err := ParseDSN(dsn); err != errInvalidDSNUnsafeCollation {
+		db, err = sql.Open("mysql", dsn)
+		if err != nil {
+			t.Fatalf("error connecting: %s", err.Error())
+		}
+		defer db.Close()
+	}
+
+	dbt := &DBTest{t, db}
+
+	var attrValue string
+	queryString := "SELECT ATTR_VALUE FROM performance_schema.session_account_connect_attrs WHERE PROCESSLIST_ID = CONNECTION_ID() and ATTR_NAME = ?"
+	rows := dbt.mustQuery(queryString, connAttrClientName)
+	if rows.Next() {
+		rows.Scan(&attrValue)
+		if attrValue != connAttrClientNameValue {
+			dbt.Errorf("expected %q, got %q", connAttrClientNameValue, attrValue)
+		}
+	} else {
+		dbt.Errorf("no data")
+	}
+	rows.Close()
+
+	rows = dbt.mustQuery(queryString, attr2)
+	if rows.Next() {
+		rows.Scan(&attrValue)
+		if attrValue != value2 {
+			dbt.Errorf("expected %q, got %q", value2, attrValue)
+		}
+	} else {
+		dbt.Errorf("no data")
+	}
+	rows.Close()
 }
